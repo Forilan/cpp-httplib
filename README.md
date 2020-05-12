@@ -2,12 +2,13 @@ cpp-httplib
 ===========
 
 [![](https://github.com/yhirose/cpp-httplib/workflows/test/badge.svg)](https://github.com/yhirose/cpp-httplib/actions)
-[![Build Status](https://travis-ci.org/yhirose/cpp-httplib.svg?branch=master)](https://travis-ci.org/yhirose/cpp-httplib)
 [![Bulid Status](https://ci.appveyor.com/api/projects/status/github/yhirose/cpp-httplib?branch=master&svg=true)](https://ci.appveyor.com/project/yhirose/cpp-httplib)
 
 A C++11 single-file header-only cross platform HTTP/HTTPS library.
 
 It's extremely easy to setup. Just include **httplib.h** file in your code!
+
+For Windows users: Please read [this note](https://github.com/yhirose/cpp-httplib#windows).
 
 Server Example
 --------------
@@ -17,24 +18,34 @@ Server Example
 
 int main(void)
 {
-    using namespace httplib;
+  using namespace httplib;
 
-    Server svr;
+  Server svr;
 
-    svr.Get("/hi", [](const Request& req, Response& res) {
-        res.set_content("Hello World!", "text/plain");
-    });
+  svr.Get("/hi", [](const Request& req, Response& res) {
+    res.set_content("Hello World!", "text/plain");
+  });
 
-    svr.Get(R"(/numbers/(\d+))", [&](const Request& req, Response& res) {
-        auto numbers = req.matches[1];
-        res.set_content(numbers, "text/plain");
-    });
+  svr.Get(R"(/numbers/(\d+))", [&](const Request& req, Response& res) {
+    auto numbers = req.matches[1];
+    res.set_content(numbers, "text/plain");
+  });
 
-    svr.Get("/stop", [&](const Request& req, Response& res) {
-        svr.stop();
-    });
+  svr.Get("/body-header-param", [](const Request& req, Response& res) {
+    if (req.has_header("Content-Length")) {
+      auto val = req.get_header_value("Content-Length");
+    }
+    if (req.has_param("key")) {
+      auto val = req.get_param_value("key");
+    }
+    res.set_content(req.body, "text/plain");
+  });
 
-    svr.listen("localhost", 1234);
+  svr.Get("/stop", [&](const Request& req, Response& res) {
+    svr.stop();
+  });
+
+  svr.listen("localhost", 1234);
 }
 ```
 
@@ -102,18 +113,18 @@ NOTE: These the static file server methods are not thread safe.
 
 ```cpp
 svr.set_logger([](const auto& req, const auto& res) {
-    your_logger(req, res);
+  your_logger(req, res);
 });
 ```
 
-### Error Handler
+### Error handler
 
 ```cpp
 svr.set_error_handler([](const auto& req, auto& res) {
-    auto fmt = "<p>Error Status: <span style='color:red;'>%d</span></p>";
-    char buf[BUFSIZ];
-    snprintf(buf, sizeof(buf), fmt, res.status);
-    res.set_content(buf, "text/html");
+  auto fmt = "<p>Error Status: <span style='color:red;'>%d</span></p>";
+  char buf[BUFSIZ];
+  snprintf(buf, sizeof(buf), fmt, res.status);
+  res.set_content(buf, "text/html");
 });
 ```
 
@@ -121,31 +132,12 @@ svr.set_error_handler([](const auto& req, auto& res) {
 
 ```cpp
 svr.Post("/multipart", [&](const auto& req, auto& res) {
-    auto size = req.files.size();
-    auto ret = req.has_file("name1");
-    const auto& file = req.get_file_value("name1");
-    // file.filename;
-    // file.content_type;
-    // file.content;
-});
-
-```
-
-### Send content with Content provider
-
-```cpp
-const uint64_t DATA_CHUNK_SIZE = 4;
-
-svr.Get("/stream", [&](const Request &req, Response &res) {
-  auto data = new std::string("abcdefg");
-
-  res.set_content_provider(
-    data->size(), // Content length
-    [data](uint64_t offset, uint64_t length, DataSink &sink) {
-      const auto &d = *data;
-      sink.write(&d[offset], std::min(length, DATA_CHUNK_SIZE));
-    },
-    [data] { delete data; });
+  auto size = req.files.size();
+  auto ret = req.has_file("name1");
+  const auto& file = req.get_file_value("name1");
+  // file.filename;
+  // file.content_type;
+  // file.content;
 });
 ```
 
@@ -176,12 +168,30 @@ svr.Post("/content_receiver",
   });
 ```
 
+### Send content with Content provider
+
+```cpp
+const size_t DATA_CHUNK_SIZE = 4;
+
+svr.Get("/stream", [&](const Request &req, Response &res) {
+  auto data = new std::string("abcdefg");
+
+  res.set_content_provider(
+    data->size(), // Content length
+    [data](size_t offset, size_t length, DataSink &sink) {
+      const auto &d = *data;
+      sink.write(&d[offset], std::min(length, DATA_CHUNK_SIZE));
+    },
+    [data] { delete data; });
+});
+```
+
 ### Chunked transfer encoding
 
 ```cpp
 svr.Get("/chunked", [&](const Request& req, Response& res) {
   res.set_chunked_content_provider(
-    [](uint64_t offset, DataSink &sink) {
+    [](size_t offset, DataSink &sink) {
        sink.write("123", 3);
        sink.write("345", 3);
        sink.write("789", 3);
@@ -200,11 +210,7 @@ Please check [here](https://github.com/yhirose/cpp-httplib/blob/master/example/s
 
 `ThreadPool` is used as a default task queue, and the default thread count is set to value from `std::thread::hardware_concurrency()`.
 
-Set thread count to 8:
-
-```cpp
-#define CPPHTTPLIB_THREAD_POOL_COUNT 8
-```
+You can change the thread count by setting `CPPHTTPLIB_THREAD_POOL_COUNT`.
 
 ### Override the default thread pool with yours
 
@@ -232,10 +238,26 @@ svr.new_task_queue = [] {
 };
 ```
 
+### 'Expect: 100-continue' handler
+
+As default, the server sends `100 Continue` response for `Expect: 100-continue` header.
+
+```cpp
+// Send a '417 Expectation Failed' response.
+svr.set_expect_100_continue_handler([](const Request &req, Response &res) {
+  return 417;
+});
+```
+
+```cpp
+// Send a final status without reading the message body.
+svr.set_expect_100_continue_handler([](const Request &req, Response &res) {
+  return res.status = 401;
+});
+```
+
 Client Example
 --------------
-
-### GET
 
 ```c++
 #include <httplib.h>
@@ -243,36 +265,37 @@ Client Example
 
 int main(void)
 {
-    httplib::Client cli("localhost", 1234);
+  // IMPORTANT: 1st parameter must be a hostname or an IP adress string.
+  httplib::Client cli("localhost", 1234);
 
-    auto res = cli.Get("/hi");
-    if (res && res->status == 200) {
-        std::cout << res->body << std::endl;
-    }
+  auto res = cli.Get("/hi");
+  if (res && res->status == 200) {
+    std::cout << res->body << std::endl;
+  }
 }
 ```
 
 ### GET with HTTP headers
 
 ```c++
-  httplib::Headers headers = {
-    { "Accept-Encoding", "gzip, deflate" }
-  };
-  auto res = cli.Get("/hi", headers);
+httplib::Headers headers = {
+  { "Accept-Encoding", "gzip, deflate" }
+};
+auto res = cli.Get("/hi", headers);
 ```
 
 ### GET with Content Receiver
 
 ```c++
-  std::string body;
+std::string body;
 
-  auto res = cli.Get("/large-data",
-    [&](const char *data, uint64_t data_length) {
-      body.append(data, data_length);
-      return true;
-    });
+auto res = cli.Get("/large-data",
+  [&](const char *data, size_t data_length) {
+    body.append(data, data_length);
+    return true;
+  });
 
-  assert(res->body.empty());
+assert(res->body.empty());
 ```
 
 ### POST
@@ -305,15 +328,15 @@ auto res = cli.Post("/post", params);
 ### POST with Multipart Form Data
 
 ```c++
-  httplib::MultipartFormDataItems items = {
-    { "text1", "text default", "", "" },
-    { "text2", "aωb", "", "" },
-    { "file1", "h\ne\n\nl\nl\no\n", "hello.txt", "text/plain" },
-    { "file2", "{\n  \"world\", true\n}\n", "world.json", "application/json" },
-    { "file3", "", "", "application/octet-stream" },
-  };
+httplib::MultipartFormDataItems items = {
+  { "text1", "text default", "", "" },
+  { "text2", "aωb", "", "" },
+  { "file1", "h\ne\n\nl\nl\no\n", "hello.txt", "text/plain" },
+  { "file2", "{\n  \"world\", true\n}\n", "world.json", "application/json" },
+  { "file3", "", "", "application/octet-stream" },
+};
 
-  auto res = cli.Post("/multipart", items);
+auto res = cli.Post("/multipart", items);
 ```
 
 ### PUT
@@ -347,12 +370,12 @@ httplib::Client client(url, port);
 
 // prints: 0 / 000 bytes => 50% complete
 std::shared_ptr<httplib::Response> res =
-    cli.Get("/", [](uint64_t len, uint64_t total) {
-        printf("%lld / %lld bytes => %d%% complete\n",
-            len, total,
-            (int)((len/total)*100));
-        return true; // return 'false' if you want to cancel the request.
-    }
+  cli.Get("/", [](uint64_t len, uint64_t total) {
+    printf("%lld / %lld bytes => %d%% complete\n",
+      len, total,
+      (int)(len*100/total));
+    return true; // return 'false' if you want to cancel the request.
+  }
 );
 ```
 
@@ -412,6 +435,15 @@ Get(requests, "/get-request1");
 Get(requests, "/get-request2");
 Post(requests, "/post-request1", "text", "text/plain");
 Post(requests, "/post-request2", "text", "text/plain");
+
+const size_t DATA_CHUNK_SIZE = 4;
+std::string data("abcdefg");
+Post(requests, "/post-request-with-content-provider",
+  data.size(),
+  [&](size_t offset, size_t length, DataSink &sink){
+    sink.write(&data[offset], std::min(length, DATA_CHUNK_SIZE));
+  },
+  "text/plain");
 
 std::vector<Response> responses;
 if (cli.send(requests, responses)) {
@@ -492,7 +524,26 @@ httplib.h  httplib.cc
 NOTE
 ----
 
+### g++
+
 g++ 4.8 and below cannot build this library since `<regex>` in the versions are [broken](https://stackoverflow.com/questions/12530406/is-gcc-4-8-or-earlier-buggy-about-regular-expressions).
+
+### Windows
+
+Include `httplib.h` before `Windows.h` or include `Windows.h` by defining `WIN32_LEAN_AND_MEAN` beforehand.
+
+```cpp
+#include <httplib.h>
+#include <Windows.h>
+```
+
+```cpp
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include <httplib.h>
+```
+
+Note: Cygwin on Windows is not supported.
 
 License
 -------
@@ -502,43 +553,4 @@ MIT license (© 2020 Yuji Hirose)
 Special Thanks To
 -----------------
 
-The following folks made great contributions to polish this library to totally another level from a simple toy!
-
-  * [Zefz](https://github.com/Zefz)
-  * [PixlRainbow](https://github.com/PixlRainbow)
-  * [sgraham](https://github.com/sgraham)
-  * [mrexodia](https://github.com/mrexodia)
-  * [hyperxor](https://github.com/hyperxor)
-  * [omaralvarez](https://github.com/omaralvarez)
-  * [vvanelslande](https://github.com/vvanelslande)
-  * [underscorediscovery](https://github.com/underscorediscovery)
-  * [sux2mfgj](https://github.com/sux2mfgj)
-  * [matvore](https://github.com/matvore)
-  * [intmain-io](https://github.com/intmain)
-  * [davidgfnet](https://github.com/davidgfnet)
-  * [crtxcr](https://github.com/crtxcr)
-  * [const-volatile](https://github.com/const)
-  * [aguadoenzo](https://github.com/aguadoenzo)
-  * [TheMaverickProgrammer](https://github.com/TheMaverickProgrammer)
-  * [vdudouyt](https://github.com/vdudouyt)
-  * [stupedama](https://github.com/stupedama)
-  * [rockwotj](https://github.com/rockwotj)
-  * [marknelson](https://github.com/marknelson)
-  * [jaspervandeven](https://github.com/jaspervandeven)
-  * [hans-erickson](https://github.com/hans)
-  * [ha11owed](https://github.com/ha11owed)
-  * [gulrak](https://github.com/gulrak)
-  * [dolphineye](https://github.com/dolphineye)
-  * [danielzehe](https://github.com/danielzehe)
-  * [batist73](https://github.com/batist73)
-  * [barryam3](https://github.com/barryam3)
-  * [adikabintang](https://github.com/adikabintang)
-  * [aaronalbers](https://github.com/aaronalbers)
-  * [Whitetigerswt](https://github.com/Whitetigerswt)
-  * [TangHuaiZhe](https://github.com/TangHuaiZhe)
-  * [Sil3ntStorm](https://github.com/Sil3ntStorm)
-  * [MannyClicks](https://github.com/MannyClicks)
-  * [DraTeots](https://github.com/DraTeots)
-  * [BastienDurel](https://github.com/BastienDurel)
-  * [vitalyster](https://github.com/vitalyster)
-  * [trollixx](https://github.com/trollixx)
+[These folks](https://github.com/yhirose/cpp-httplib/graphs/contributors) made great contributions to polish this library to totally another level from a simple toy!

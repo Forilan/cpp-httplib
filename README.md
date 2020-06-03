@@ -181,6 +181,7 @@ svr.Get("/stream", [&](const Request &req, Response &res) {
     [data](size_t offset, size_t length, DataSink &sink) {
       const auto &d = *data;
       sink.write(&d[offset], std::min(length, DATA_CHUNK_SIZE));
+      return true; // return 'false' if you want to cancel the process.
     },
     [data] { delete data; });
 });
@@ -192,13 +193,52 @@ svr.Get("/stream", [&](const Request &req, Response &res) {
 svr.Get("/chunked", [&](const Request& req, Response& res) {
   res.set_chunked_content_provider(
     [](size_t offset, DataSink &sink) {
-       sink.write("123", 3);
-       sink.write("345", 3);
-       sink.write("789", 3);
-       sink.done();
+      sink.write("123", 3);
+      sink.write("345", 3);
+      sink.write("789", 3);
+      sink.done();
+      return true; // return 'false' if you want to cancel the process.
     }
   );
 });
+```
+
+### 'Expect: 100-continue' handler
+
+As default, the server sends `100 Continue` response for `Expect: 100-continue` header.
+
+```cpp
+// Send a '417 Expectation Failed' response.
+svr.set_expect_100_continue_handler([](const Request &req, Response &res) {
+  return 417;
+});
+```
+
+```cpp
+// Send a final status without reading the message body.
+svr.set_expect_100_continue_handler([](const Request &req, Response &res) {
+  return res.status = 401;
+});
+```
+
+### Keep-Alive connection
+
+```cpp
+svr.set_keep_alive_max_count(2); // Default is 5
+```
+
+### Timeout
+
+```c++
+svr.set_read_timeout(5, 0); // 5 seconds
+svr.set_write_timeout(5, 0); // 5 seconds
+svr.set_idle_interval(0, 100000); // 100 milliseconds
+```
+
+### Set maximum payload length for reading request body
+
+```c++
+svr.set_payload_max_length(1024 * 1024 * 512); // 512MB
 ```
 
 ### Server-Sent Events
@@ -236,24 +276,6 @@ private:
 svr.new_task_queue = [] {
   return new YourThreadPoolTaskQueue(12);
 };
-```
-
-### 'Expect: 100-continue' handler
-
-As default, the server sends `100 Continue` response for `Expect: 100-continue` header.
-
-```cpp
-// Send a '417 Expectation Failed' response.
-svr.set_expect_100_continue_handler([](const Request &req, Response &res) {
-  return 417;
-});
-```
-
-```cpp
-// Send a final status without reading the message body.
-svr.set_expect_100_continue_handler([](const Request &req, Response &res) {
-  return res.status = 401;
-});
 ```
 
 Client Example
@@ -358,11 +380,43 @@ res = cli.Options("*");
 res = cli.Options("/resource/foo");
 ```
 
-### Connection Timeout
+### Timeout
 
 ```c++
-cli.set_timeout_sec(5); // timeouts in 5 seconds
+cli.set_connection_timeout(0, 300000); // 300 milliseconds
+cli.set_read_timeout(5, 0); // 5 seconds
+cli.set_write_timeout(5, 0); // 5 seconds
 ```
+
+### Receive content with Content receiver
+
+```cpp
+std::string body;
+auto res = cli.Get(
+  "/stream", Headers(),
+  [&](const Response &response) {
+    EXPECT_EQ(200, response.status);
+    return true; // return 'false' if you want to cancel the request.
+  },
+  [&](const char *data, size_t data_length) {
+    body.append(data, data_length);
+    return true; // return 'false' if you want to cancel the request.
+  });
+```
+
+### Send content with Content provider
+
+```cpp
+std::string body = ...;
+auto res = cli_.Post(
+  "/stream", body.size(),
+  [](size_t offset, size_t length, DataSink &sink) {
+    sink.write(body.data() + offset, length);
+    return true; // return 'false' if you want to cancel the request.
+  },
+  "text/plain");
+```
+
 ### With Progress Callback
 
 ```cpp
@@ -494,7 +548,7 @@ cli.enable_server_certificate_verification(true);
 Zlib Support
 ------------
 
-'gzip' compression is available with `CPPHTTPLIB_ZLIB_SUPPORT`.
+'gzip' compression is available with `CPPHTTPLIB_ZLIB_SUPPORT`. `libz` should be linked.
 
 The server applies gzip compression to the following MIME type contents:
 
@@ -505,11 +559,19 @@ The server applies gzip compression to the following MIME type contents:
   * application/xml
   * application/xhtml+xml
 
-### Compress content on client
+### Compress request body on client
 
 ```c++
 cli.set_compress(true);
 res = cli.Post("/resource/foo", "...", "text/plain");
+```
+
+### Compress response body on client
+
+```c++
+cli.set_decompress(false);
+res = cli.Get("/resource/foo", {{"Accept-Encoding", "gzip, deflate"}});
+res->body; // Compressed data
 ```
 
 Split httplib.h into .h and .cc
